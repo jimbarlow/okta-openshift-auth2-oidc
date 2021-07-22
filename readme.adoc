@@ -1,0 +1,248 @@
+= Configuring Okta and OpenShift as OpenID Authentication
+:icons: font
+:author: Jim Barlow <jim@jimbarlow.com>
+:pygments: emacs
+:imagesdir: images
+:hide-uri-scheme:
+
+Okta is a popular Oauth2 OIDC Identity provider for enterprises. It is used as a service from Okta.com, and is also an https://github.com[Open Source Project] 
+
+== Obtaining an Okta Developer's Account
+
+At the time of this writing, a limited Okta account can be obtained at https://https://developer.okta.com/signup/.
+
+== Authentication with Okta
+
+We must create an App-Integration.
+
+
+=== Creating your Okta App for OpenShift
+
+With your developer account, the first step is to go to the dashboard and add an app.  Select "Create App Integration"
+
+image::add_an_app.png[App Integration]
+
+We will be using the OIDC OpenID Connect strategy here.
+
+At this point we will need to gather the Client ID and Client secret for the OpenShift Side.
+
+image::okta-new-app.png[]
+
+image::okta-domain.png[]
+
+
+== Group Synchronization with Okta Groups
+
+https://github.com/redhat-cop/group-sync-operator
+
+
+And at the bottom of the page, note the ```oauth-openshift``` prefix on your ```apps``` wildcard domain as the URIs for Sign--in and Initiate login. The Sign-out redirect URI is simply your console 
+
+[source bash]
+oc whoami --show-server 
+
+To find your oauth-openshift route you may issue the following command:
+
+[source bash]
+oc get routes -n openshift-authentication -o jsonpath="{.items[*].spec.host}"
+
+=== Assign Users
+
+Assigning a user will help us log in as that user! Assigning a couple of users will let us experiment with groups later.
+
+image:okta-assign-users.png[assign users]
+
+=== Create the Provider in OpenShift
+
+We will apply a manifest we describe as below, put this in a file called "okta-config.yml"
+
+[source, yaml]
+kind: OAuth
+metadata:
+  name: cluster
+spec:
+  identityProviders:
+    - mappingMethod: claim
+      name: okta
+      openID:
+        claims:
+          email:
+          - email
+          name:
+          - name
+          preferredUsername:
+          - email
+        clientID: 0oa19b5ho3YxYHosg5d7
+        clientSecret:
+          name: openid-okta-secret
+        extraScopes:
+        - email
+        - profile
+        issuer: https://dev-xxxxxxx.okta.com
+      type: OpenID
+
+Note three things above
+
+* issuer: is your "Okta domain" from your general settings when you defined your OpenShift application. This is used often.
+
+* *openid-okta-secret must yet be defined*
+
+* issuer is your own Okta account domain
+
+[source,bash]
+oc create secret generic openid-okta-secret --from-literal=clientSecret=xxxxxxxxxxxxxxxx-n openshift-config
+
+Note the hexadecimal secret literal above, this needs to be replaced with your "Client secret" from your "Client credentials" in your Application General settings page
+
+At this time we can issue the commands:
+
+[source, bash]
+----
+oc apply -f okta-config.yml
+----
+
+Ignore the complaining from the oc command about the use of create vs. apply.
+
+=== Time to Log In!
+
+Go to your console URL and make sure you are logged out.
+
+image::login-provider.png[Login Provider,480]
+
+You can guess which one you want to click.
+
+If your browser is not logged in to your Okta account, you will be redirected to login to Okta
+
+image::okta-redirect.png[Okta Redirect, 360]]
+
+
+The result should be a successful login with your username the top right
+
+image::logged-in.png[Logged In]
+
+=== Users in OpenShift
+
+Users do not exist exist within OpenShift until they are first logged-in. They are then given a default group that is assigned to them, ```system:authenticated```
+
+image::get-users.png[]
+
+Note the okta identity to show the source identity logged in. Full name is derived from the user as defined in okta, and the username is the e-mail due to the way in which we mapped it in the okta-config.yml file 
+
+== Logging in from the command line
+
+First obtain the oc (OpenShift Command) command line utility if you do not have it installed in your path.
+
+The download location is indicated when you click the question-mark (What else would it be?) by your username.  
+
+image::get-tools.png[]
+
+The "Copy Login Command" link (also available from the down-arrow by your name) will yield this command line for logging in.
+
+You WILL be prompted to re-authenticate at this time, you will get the same Okta redirect login.
+
+image::get-token.png[]
+
+= Group Synchronization
+
+
+If you use an OIDC or other Oauth2 provider for authentication, you will likely want to use Active Directory or some other Group tool to assign authorization.
+
+This is covered in the documentation for OpenShift. Okta group synchronization, is provided by a community GroupSync operator found at https://github.com/redhat-cop/group-sync-operator
+
+=== Create a Group in Okta
+
+It is going to be the most fun if you have two or more users in the group. Here I have added myself and a mythical user Devin Developer.
+
+image::group-with-users.png[Group With Users, 680]
+
+The next tab lets us add the "Application" to the group:
+
+image::add-the-app.png[Add The App, 680] 
+
+=== Install the GroupSync Operator
+
+As an cluster-admin capable user, using the Administrator persona (see green box highlight) find and install the GroupSync operator
+
+image::install-operator-1.png[]
+
+We hope it ends up looking like this in "Installed Operators"
+
+image::install-operator-2.png[]
+
+There is a lot of good help text supplied within the operator instance.
+
+Now it is time to Create the Group Sync object.
+
+Create a file (I called my okta-sync.yml):
+
+[source, yaml]
+----
+apiVersion: redhatcop.redhat.io/v1alpha1
+kind: GroupSync
+metadata:
+  name: okta-sync
+spec:
+  schedule: "10 * * * *"
+  providers:
+    - name: okta
+      okta:
+        credentialsSecret:
+          name: okta-token
+          namespace: group-sync-operator
+        url: "https://dev-xxxxxxxx.okta.com/"
+        appId: 0oa19b5ho3YxYHosg5d7
+----
+
+The schedule is the secret sauce to keetpign things up to date. This will be in the linux crontab format schedule of the sync process. The above format says "Run this sync at 10 minutes after the hour, every hour"
+
+The *okta-token* we are about to create.
+
+the URL is the Okta domain *With a trailing slash*.
+
+The *appId* is from section one, and is called the *Client ID* in the Okta application Client Credentials for our OpenShift instance.
+
+=== Add an API Authorization Server in Okta
+
+I didn't create a new Auth Server, I'm using the default as per below:
+
+image::okta-auth-server.png[Auth Server, 680]
+
+The second tab allows you to create a token. Hey look, I'm a "super admin". I think that's a promotion!
+
+image::okta-api-token.png[Add a Token, 680]
+
+It is important to name the token the same as we put it in the okta-sync.yml
+
+Now let us create our GroupSync object with the oc apply command (note the result)
+
+
+[source,bash]
+----
+$ oc apply -f okta-sync.yml
+groupsync.redhatcop.redhat.io/okta-sync created
+----
+
+Here is the result:
+
+image::okta-group-sync-result.png[Result, 480]
+
+We have a synchronized groups. There are a lot of extra things to do in terms of scopes, assigning roles to users and groups, etc, but this is the basic minimal operating result.
+
+Special thanks to Michael McNeill for his highly skilled and generous assistance and Pravin Mali for his OpenShift.com blog showing the way to get started for Okta use.
+
+== Reference Resources
+
+Pavin's Blog:
+
+https://www.openshift.com/blog/how-to-configure-okta-as-an-identity-provider-for-openshift 
+
+Andrew Block's GroupSync Announcement:
+
+https://twitter.com/sabre1041/status/1372229609211752450
+
+
+
+
+
+
+
